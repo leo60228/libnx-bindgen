@@ -1,0 +1,12 @@
+[package]
+name = "libnx-bindgen"
+version = "0.1.0"
+authors = ["leo60228 <iakornfeld@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clang = { version = "0.22.0", features = [ "clang_3_9" ] }
+walkdir = "2.2.7"
+heck = "0.3.1"
