@@ -5,7 +5,6 @@ use syn::visit::Visit;
 use std::fs::File;
 use std::io::prelude::*;
 use itertools::Itertools;
-use std::collections::HashMap;
 
 pub struct FunctionVisitor<'a> {
     functions: Vec<ForeignItemFn>,
@@ -74,9 +73,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exit = exit.unwrap();
     let exit_ident = &exit.ident;
 
-    let call_orig_idents: Vec<_> = calls.iter().map(|e| e.ident.clone()).collect();
-    let call_idents: Vec<_> = calls.iter().map(|e| syn::Ident::new(&(e.ident.to_string()[prefix.len()..]).to_snake_case(), proc_macro2::Span::call_site())).collect();
-    let call_args: Vec<_> = calls.iter().map(|e| e.decl.inputs.iter().map(|arg| {
+    let call_orig_idents = calls.iter().map(|e| e.ident.clone());
+    let call_idents = calls.iter().map(|e| syn::Ident::new(&(e.ident.to_string()[prefix.len()..]).to_snake_case(), proc_macro2::Span::call_site()));
+    let call_args = calls.iter().map(|e| e.decl.inputs.iter().map(|arg| {
         if let syn::FnArg::Captured(captured_arg) = arg {
             if let syn::Pat::Ident(pat_ident) = &captured_arg.pat {
                  return pat_ident.ident.clone();
@@ -84,15 +83,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         unreachable!();
-    }).collect::<syn::punctuated::Punctuated<syn::Ident, syn::Token![,]>>()).collect();
-    let call_params: Vec<_> = calls.iter().map(|e| e.decl.inputs.clone()).collect();
+    }).collect::<syn::punctuated::Punctuated<syn::Ident, syn::Token![,]>>());
+    let call_params = calls.iter().map(|e| e.decl.inputs.clone());
+    let call_returns = calls.iter().map(|e| if let syn::ReturnType::Type(_, typ) = &e.decl.output {
+        quote! {-> #typ}
+    } else {
+        quote! {}
+    });
+
+    let init_is_result = if let syn::ReturnType::Type(_, typ) = init.decl.output {
+        if let syn::Type::Path(typ) = *typ {
+            if let Some(segment) = typ.path.segments.last() {
+                segment.value().ident.to_string() == "Result"
+            } else { false }
+        } else { false }
+    } else { false };
+
+    let init_pat = if init_is_result {
+        quote! { 0 }
+    } else {
+        quote! { _ }
+    };
 
     let service = quote! {
 use crate::macros::handle;
 
-handle!(0 in #init_ident(), #exit_ident(), {
+handle!(#init_pat in #init_ident(), #exit_ident(), {
     #(
-        pub fn #call_idents(&mut self, #call_params) {
+        pub fn #call_idents(&mut self, #call_params) #call_returns {
             unsafe { sys::#call_orig_idents(#call_args) }
         }
     )*
