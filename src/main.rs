@@ -1,230 +1,105 @@
-use clang::*;
-use walkdir::WalkDir;
+use proc_quote::quote;
 use heck::SnakeCase;
-use std::collections::HashSet;
+use syn::ForeignItemFn;
+use syn::visit::Visit;
+use std::fs::File;
+use std::io::prelude::*;
+use itertools::Itertools;
+use std::collections::HashMap;
 
-fn invoke_handle<'tu>(functions: sonar::Functions<'tu>, prefix: &str) {
+pub struct FunctionVisitor<'a> {
+    functions: Vec<ForeignItemFn>,
+    prefix: &'a str,
+}
+
+impl FunctionVisitor<'_> {
+    pub fn new<'a>(prefix: &'a str) -> FunctionVisitor<'a> {
+        FunctionVisitor {
+            functions: Vec::new(),
+            prefix,
+        }
+    }
+}
+
+impl<'a> From<FunctionVisitor<'a>> for Vec<ForeignItemFn> {
+    fn from(visitor: FunctionVisitor) -> Self {
+        visitor.functions
+    }
+}
+
+impl<'ast, 'a> Visit<'ast> for FunctionVisitor<'a> {
+    fn visit_foreign_item_fn(&mut self, func: &'ast ForeignItemFn) {
+        if func.ident.to_string().starts_with(self.prefix) {
+            self.functions.push(func.clone());
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (bindgen, prefix) = std::env::args().skip(1).next_tuple().unwrap();
+
+    let bindgen_text = {
+        let mut file = File::open(&bindgen)?;
+        let mut s = String::new();
+        file.read_to_string(&mut s)?;
+        s
+    };
+
+    let file = syn::parse_file(&bindgen_text)?;
+
+    let functions: Vec<ForeignItemFn> = {
+        let mut visitor = FunctionVisitor::new(&prefix);
+        visitor.visit_file(&file);
+        visitor.into()
+    };
+
     let mut init = None;
     let mut exit = None;
+    let mut calls: Vec<ForeignItemFn> = Vec::new();
 
-    for func in functions {
-        if !func.name.starts_with(prefix) { continue; }
-
-        if func.name.ends_with("Initialize") || func.name.ends_with("Init") {
-            init = Some(func);
-        } else if func.name.ends_with("Exit") {
-            exit = Some(func);
+    for function in functions {
+        let name = function.ident.to_string();
+        if name.ends_with("Initialize") && name.len() == prefix.len() + "Initialize".len() {
+            init = Some(function);
+        } else if name.ends_with("Exit") && name.len() == prefix.len() + "Exit".len() {
+            exit = Some(function);
+        } else {
+            calls.push(function);
         }
-
-        if init.is_some() && exit.is_some() { break; }
     }
 
     let init = init.unwrap();
+    let init_ident = &init.ident;
+
     let exit = exit.unwrap();
+    let exit_ident = &exit.ident;
 
-    print!("handle!(");
-
-    if init.entity.get_result_type().unwrap().get_display_name() == "Result" {
-        print!("0");
-    } else {
-        print!("_");
-    }
-
-    print!(" in sys::{}(", init.name);
-
-    let mut first = true;
-
-    for argument in init.entity.get_arguments().unwrap() {
-        if !first {
-            print!(", ");
-        }
-
-        first = true;
-
-        let typ = argument.get_type().unwrap();
-        if typ.get_pointee_type().is_some() {
-            if typ.get_display_name().starts_with("const ") {
-                print!("ptr::null()");
-            } else {
-                print!("ptr::null_mut()");
-            }
-        } else {
-            print!("Default::default()");
-        }
-    }
-
-    print!("), sys::{}(", exit.name);
-
-    for argument in exit.entity.get_arguments().unwrap() {
-        if !first {
-            print!(", ");
-        }
-
-        first = true;
-
-        let typ = argument.get_type().unwrap();
-        if typ.get_pointee_type().is_some() {
-            if typ.get_display_name().starts_with("const ") {
-                print!("ptr::null()");
-            } else {
-                print!("ptr::null_mut()");
-            }
-        } else {
-            print!("Default::default()");
-        }
-    }
-
-    println!("), {{");
-}
-
-fn main() {
-    let prefix = std::env::args().nth(1);
-
-    if prefix.is_some() {
-        println!("use crate::sys;");
-        println!("use crate::macros::handle;");
-        println!("use std::ptr;\n");
-    }
-
-    let clang = Clang::new().unwrap();
-    let index = Index::new(&clang, false, false);
-
-    let mut units = Vec::new();
-    for entry in WalkDir::new("libnx/nx/include/") {
-        let entry = entry.unwrap();
-        if entry.file_type().is_dir() { continue; }
-        let parser = index.parser(entry.into_path());
-        let unit = parser.parse().unwrap();
-        units.push(unit);
-    }
-
-    let entities: Vec<_> = units.iter().flat_map(|e| e.get_entity().get_children()).collect();
-
-    if let Some(prefix) = &prefix {
-        invoke_handle(sonar::find_functions(entities.clone()), prefix);
-    }
-
-    let mut exported_types = HashSet::new();
-    let mut first = true;
-
-    let functions = sonar::find_functions(entities);
-    for function in functions {
-        let func_name = (if let Some(prefix) = &prefix {
-            if !function.name.starts_with::<&str>(prefix.as_ref()) { continue; }
-            if function.name.ends_with("Initialize") { continue; }
-            if function.name.ends_with("Exit") { continue; }
-            (&function.name[prefix.len()..]).to_string()
-        } else {
-            function.name.clone()
-        }).to_snake_case();
-
-        if !first {
-            print!("\n");
-        }
-
-        first = false;
-
-        let mut args = Vec::new();
-
-        if prefix.is_some() { print!("    "); }
-        print!("pub fn {}(&mut self", &func_name);
-
-        for argument in function.entity.get_arguments().unwrap_or_else(Vec::new) {
-            let typ = argument.get_type().unwrap();
-
-            let (is_pointer, typ) = if let Some(ptr) = typ.get_pointee_type() {
-                (true, ptr)
-            } else {
-                (false, typ)
-            };
-
-            args.push(argument.get_name().unwrap());
-
-            print!(", {}: ", argument.get_name().unwrap());
-
-            let typ_name = match typ.get_display_name().as_ref() {
-                "Result" => "LibnxResult".to_string(),
-                "int" => "i32".to_string(),
-                "void" => "()".to_string(),
-                "const void" => "const ()".to_string(),
-                "u8" => "u8".to_string(),
-                "u16" => "u16".to_string(),
-                "u32" => "u32".to_string(),
-                "u64" => "u64".to_string(),
-                "i8" => "i8".to_string(),
-                "i16" => "i16".to_string(),
-                "i32" => "i32".to_string(),
-                "i64" => "i64".to_string(),
-                "const char" => "const char".to_string(),
-                "char" => "char".to_string(),
-                other => {
-                    exported_types.insert(other.to_string());
-                    other.to_string()
-                },
-            };
-
-            if is_pointer && typ_name.starts_with("const") {
-                print!("*{}", typ_name);
-            } else {
-                if is_pointer {
-                    print!("*mut {}", typ_name);
-                } else {
-                    print!("{}", typ_name);
-                }
+    let call_orig_idents: Vec<_> = calls.iter().map(|e| e.ident.clone()).collect();
+    let call_idents: Vec<_> = calls.iter().map(|e| syn::Ident::new(&(e.ident.to_string()[prefix.len()..]).to_snake_case(), proc_macro2::Span::call_site())).collect();
+    let call_args: Vec<_> = calls.iter().map(|e| e.decl.inputs.iter().map(|arg| {
+        if let syn::FnArg::Captured(captured_arg) = arg {
+            if let syn::Pat::Ident(pat_ident) = &captured_arg.pat {
+                 return pat_ident.ident.clone();
             }
         }
 
-        print!(") ");
+        unreachable!();
+    }).collect::<syn::punctuated::Punctuated<syn::Ident, syn::Token![,]>>()).collect();
+    let call_params: Vec<_> = calls.iter().map(|e| e.decl.inputs.clone()).collect();
 
-        if let Some(ret) = function.entity.get_result_type() {
-            let (is_pointer, ret) = if let Some(ptr) = ret.get_pointee_type() {
-                (true, ptr)
-            } else {
-                (false, ret)
-            };
+    let service = quote! {
+use crate::macros::handle;
 
-            let name = match ret.get_display_name().as_ref() {
-                "Result" => "LibnxResult".to_string(),
-                "int" => "i32".to_string(),
-                other => other.to_string(),
-            };
-
-            match (name.as_ref(), is_pointer) {
-                ("void", false) => {},
-                (name, false) => { print!("-> {} ", name) },
-                ("void", true) => { print!("-> *mut () ") },
-                (name, true) => { print!("-> *mut {} ", name) },
-            }
+handle!(0 in #init_ident(), #exit_ident(), {
+    #(
+        pub fn #call_idents(&mut self, #call_params) {
+            unsafe { sys::#call_orig_idents(#call_args) }
         }
+    )*
+});
+    };
 
-        println!("{{");
+    print!("{}", service);
 
-        if prefix.is_some() { print!("    "); }
-        print!("    sys::{}(", function.name);
-
-        let mut first = true;
-
-        for arg in args {
-            if !first {
-                print!(", ");
-            }
-
-            first = false;
-
-            print!("{}", arg);
-        }
-
-        println!(").into()");
-
-        if prefix.is_some() { print!("    "); }
-        println!("}}");
-    }
-
-    if prefix.is_some() {
-        println!("}});\n");
-
-        for export in exported_types {
-            println!("pub use sys::{};", export);
-        }
-    }
+    Ok(())
 }

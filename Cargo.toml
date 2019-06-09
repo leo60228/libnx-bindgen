@@ -7,6 +7,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clang = { version = "0.22.0", features = [ "clang_3_9" ] }
-walkdir = "2.2.7"
+syn = { version = "0.15.35", features = [ "full", "visit", "extra-traits" ] }
+itertools = "0.8.0"
 heck = "0.3.1"
+proc-quote = "0.2.2"
+quote = "0.6.12"
+proc-macro2 = "0.4.30"
